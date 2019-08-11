@@ -245,6 +245,79 @@ class Database:
         
         return None
 
+    def map_into(self,
+                 func : Callable,
+                 table : str,
+                 output : str,
+                 overwrite=False) -> None:
+        """
+        Compute a calculated column by mapping a function across each row
+        of a table, using the columns corresponding to the names of
+        its arguments, and store the result as a new column (or overwrite
+        an existing column) in the given table.
+
+        Parameters
+        ----------
+        func : Callable
+            The function (callable) to map
+
+        table : str
+            The name of the table containing the columns
+
+        output : str
+            The name of the new column to save the result
+
+        overwrite : bool, default False
+            Overwrite the rows of the output column if it already exists
+            - `True` : overwrites each row in the output column, if it already exists
+            - `False` : raises `ValueError`
+
+        Raises
+        ------
+        `ValueError`
+            When `overwrite=False` and the output column already exists
+
+        """
+        if not isinstance(func, Callable):
+            raise TypeError(f'{func.__name__} is not callable')
+        if not isinstance(table, str):
+            raise TypeError('`table` must be of type str')
+        if not isinstance(output, str):
+            raise TypeError('`output` must be of type str')
+        arg_names = func.__code__.co_varnames[:func.__code__.co_argcount]
+        col_names = self.column_names(table)
+        for arg in arg_names:
+            if arg not in col_names:
+                raise ValueError(
+                  f'Argument {arg} is not a column of table {table}.')
+
+        sql = f"""SELECT {', '.join(map(escape_sqlite_ident, arg_names))}
+                  FROM {escape_sqlite_ident(table)}"""
+        # use DataFrame for better auto-type detection and NaN coercion
+        df : DataFrame = self.query(sql).to_dataframe()
+
+        if output in col_names and not overwrite:
+            msg = f"""Column already exists: {output}.
+            Set `overwrite = True` to overwrite all values in this column."""
+            raise ValueError(msg)
+
+        # each column is an argument passed into the func
+        result : list = [func(**row) for row in df.to_dict(orient='records')]
+
+        # TODO: make this more efficient. for now we'll
+        #   round-trip the whole table through pandas...
+        df = self.query(
+          f'select * from {escape_sqlite_ident(table)}').to_dataframe()
+        df[output] = result
+        self.add_table(df, name=table, if_exists='replace')
+
+        return None
+
+    def column_names(self, table: str) -> List[str]:
+        sql = f'select name from pragma_table_info({escape_sqlite_ident(table)})'
+        self._cursor.execute(sql)
+        return [r[0] for r in self._cursor.fetchall()]
+
     @property
     def name(self):
         """The name of the database"""
@@ -258,4 +331,6 @@ class Database:
     def tables(self):
         """The names of all tables in the database"""
         return self._tables
-    
+
+def escape_sqlite_ident(ident):
+    return '"' + ident.replace('"', '""') + '"'
